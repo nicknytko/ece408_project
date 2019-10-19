@@ -9,6 +9,8 @@ namespace mxnet
 namespace op
 {
 
+#define TILE_WIDTH 16
+    
 /**
  * Forward convolution stage of the neural network.
  * @param y Input (batch size * output channels * y * x)
@@ -33,8 +35,8 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    (void)H_out; // silence declared but never referenced warning. remove this line when you start working
-    (void)W_out; // silence declared but never referenced warning. remove this line when you start working
+    // const int H_grid = H_out / TILE_WIDTH;
+    const int W_grid = W_out / TILE_WIDTH;
 
 // An example use of these macros:
 // float a = y4d(0,0,0,0)
@@ -53,10 +55,23 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 #define mask_width K
 
     /* Put implementation here */
-    
-#undef y4d
-#undef x4d
-#undef k4d
+
+    const int image_idx = blockIdx.x;
+    const int image_feature = blockIdx.y;
+    const int image_y = blockIdx.z / W_grid + threadIdx.y;
+    const int image_x = blockIdx.z % W_grid + threadIdx.x;
+
+    float acc = 0;
+
+    for (int feature = 0; feature < num_input_features; feature++) {
+        for (int p = 0; p < mask_width; p++) {
+            for (int q = 0; q < mask_width; q++) {
+                acc += x4d(image_idx, feature, image_y + p, image_x + q) * k4d(image_feature, feature, p, q);
+            }
+        }
+    }
+
+    y4d(image_idx, image_feature, image_y, image_x) = acc;
 }
 
 /* 
@@ -67,25 +82,26 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 template <>
 void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tensor<gpu, 4, float> &x, const mshadow::Tensor<gpu, 4, float> &w)
 {
-
-    // Use mxnet's CHECK_EQ to do assertions.
-    // Remove this assertion when you do your implementation!
-    CHECK_EQ(0, 1) << "Remove this line and replace with your implementation";
-
     // Extract the tensor dimensions into B,M,C,H,W,K
     const int B = x.shape_[0];
     const int M = y.shape_[1];
     const int C = x.shape_[1];
     const int H = x.shape_[2];
     const int W = x.shape_[3];
-    const int K = k.shape_[3];
+    const int K = w.shape_[3];
+
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
+    const int H_grid = H_out / TILE_WIDTH;
+    const int W_grid = W_out / TILE_WIDTH;
+    const int Z = H_grid * W_grid;
     
     // Set the kernel dimensions
-    dim3 gridDim(0);
-    dim3 blockDim(0);
+    dim3 gridDim(B, M, Z);
+    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
 
     // Call the kernel
-    forward_kernel<<<gridDim, blockDim, 0, s>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+    forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
