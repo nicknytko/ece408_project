@@ -9,9 +9,21 @@ namespace mxnet
 namespace op
 {
 
+/**
+ * Forward convolution stage of the neural network.
+ * @param y Input (batch size * output channels * y * x)
+ * @param x Output data (batch size * input channels * y * x)
+ * @param k Kernel Weights (output channels * input channels * y * x)
+ * @param B Number of images in batch
+ * @param M Number of features in each output
+ * @param C Number of features in each input
+ * @param H Number of output elements
+ * @param W Image width
+ * @param K Filter mask width
+ */
 __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
-
+    
     /*
     Modify this function to implement the forward pass described in Chapter 16.
     We have added an additional dimension to the tensors to support an entire mini-batch
@@ -30,9 +42,18 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
 #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+#define input y
+#define output x
+#define weights k
+#define num_images B
+#define num_output_features M
+#define num_input_features C
+#define num_output_elements H
+#define image_width W
+#define mask_width K
 
+    /* Put implementation here */
     
-
 #undef y4d
 #undef x4d
 #undef k4d
