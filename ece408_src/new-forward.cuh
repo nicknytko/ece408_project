@@ -9,8 +9,8 @@ namespace mxnet
 namespace op
 {
 
-#define BLOCK_WIDTH 20
-#define TILE_WIDTH 16
+#define BLOCK_WIDTH 21
+#define TILE_WIDTH (BLOCK_WIDTH-4)
     
 /**
  * Forward convolution stage of the neural network.
@@ -87,7 +87,31 @@ __global__ void forward_kernel(float* __restrict__ y, const float* __restrict__ 
         if (convolve) {
             for (int i = 0; i < 5; i++) {
                 for (int j = 0; j < 5; j++) {
-                    acc += tile_data[ty + i][tx + j] * k4d(image_feature, feature, i, j);
+                    acc += tile_data[ty + 0][tx + 0] * k4d(image_feature, feature, 0, 0);
+                    acc += tile_data[ty + 0][tx + 1] * k4d(image_feature, feature, 0, 1);
+                    acc += tile_data[ty + 0][tx + 2] * k4d(image_feature, feature, 0, 2);
+                    acc += tile_data[ty + 0][tx + 3] * k4d(image_feature, feature, 0, 3);
+                    acc += tile_data[ty + 0][tx + 4] * k4d(image_feature, feature, 0, 4);
+                    acc += tile_data[ty + 1][tx + 0] * k4d(image_feature, feature, 1, 0);
+                    acc += tile_data[ty + 1][tx + 1] * k4d(image_feature, feature, 1, 1);
+                    acc += tile_data[ty + 1][tx + 2] * k4d(image_feature, feature, 1, 2);
+                    acc += tile_data[ty + 1][tx + 3] * k4d(image_feature, feature, 1, 3);
+                    acc += tile_data[ty + 1][tx + 4] * k4d(image_feature, feature, 1, 4);
+                    acc += tile_data[ty + 2][tx + 0] * k4d(image_feature, feature, 2, 0);
+                    acc += tile_data[ty + 2][tx + 1] * k4d(image_feature, feature, 2, 1);
+                    acc += tile_data[ty + 2][tx + 2] * k4d(image_feature, feature, 2, 2);
+                    acc += tile_data[ty + 2][tx + 3] * k4d(image_feature, feature, 2, 3);
+                    acc += tile_data[ty + 2][tx + 4] * k4d(image_feature, feature, 2, 4);
+                    acc += tile_data[ty + 3][tx + 0] * k4d(image_feature, feature, 3, 0);
+                    acc += tile_data[ty + 3][tx + 1] * k4d(image_feature, feature, 3, 1);
+                    acc += tile_data[ty + 3][tx + 2] * k4d(image_feature, feature, 3, 2);
+                    acc += tile_data[ty + 3][tx + 3] * k4d(image_feature, feature, 3, 3);
+                    acc += tile_data[ty + 3][tx + 4] * k4d(image_feature, feature, 3, 4);
+                    acc += tile_data[ty + 4][tx + 0] * k4d(image_feature, feature, 4, 0);
+                    acc += tile_data[ty + 4][tx + 1] * k4d(image_feature, feature, 4, 1);
+                    acc += tile_data[ty + 4][tx + 2] * k4d(image_feature, feature, 4, 2);
+                    acc += tile_data[ty + 4][tx + 3] * k4d(image_feature, feature, 4, 3);
+                    acc += tile_data[ty + 4][tx + 4] * k4d(image_feature, feature, 4, 4);
                 }
             }
         }
