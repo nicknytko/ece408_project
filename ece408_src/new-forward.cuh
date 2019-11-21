@@ -68,7 +68,7 @@ __global__ void forward_kernel(float* __restrict__ y, const float* __restrict__ 
     const int tx = threadIdx.x;
     const int image_y = (blockIdx.z / W_grid) * TILE_WIDTH + ty; /* Very crucial to working ! */ 
     const int image_x = (blockIdx.z % W_grid) * TILE_WIDTH + tx;
-    const int convolve = (tx >= 0 && tx < TILE_WIDTH && ty >= 0 && ty < TILE_WIDTH);
+    const int convolve = (tx < TILE_WIDTH && ty < TILE_WIDTH);
 
     float acc = 0;
     for (int feature = 0; feature < num_input_features; feature++) {
@@ -76,7 +76,7 @@ __global__ void forward_kernel(float* __restrict__ y, const float* __restrict__ 
         
         /* Load values */
         float val = 0;
-        if (image_x < image_width && image_y < image_width) {
+        if (image_x < W && image_y < H) {
             val = x4d(image_idx, feature, image_y, image_x);
         }
         tile_data[ty][tx] = val;
@@ -93,7 +93,7 @@ __global__ void forward_kernel(float* __restrict__ y, const float* __restrict__ 
         }
     }
 
-    if (convolve && image_y < image_width && image_x < image_width) {
+    if (convolve && image_y < H_out && image_x < W_out) {
         y4d(image_idx, image_feature, image_y, image_x) = acc;
     }
 }
