@@ -9,6 +9,7 @@ namespace mxnet
 namespace op
 {
 
+#define BLOCK_WIDTH 20
 #define TILE_WIDTH 16
     
 /**
@@ -23,7 +24,7 @@ namespace op
  * @param W Image width
  * @param K Filter mask width
  */
-__global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
+__global__ void forward_kernel(float* __restrict__ y, const float* __restrict__ x, const float* __restrict__ k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
     
     /*
@@ -35,9 +36,11 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    // const int H_grid = H_out / TILE_WIDTH;
-    const int W_grid = W_out / TILE_WIDTH;
+    const int H_grid = H_out / TILE_WIDTH;
+    const int W_grid = (W_out + (TILE_WIDTH - 1)) / TILE_WIDTH;
 
+    (void) H_grid;
+    
 // An example use of these macros:
 // float a = y4d(0,0,0,0)
 // y4d(0,0,0,0) = a
@@ -56,22 +59,43 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 
     /* Put implementation here */
 
+    __shared__ float tile_data[BLOCK_WIDTH][BLOCK_WIDTH];
+    
     const int image_idx = blockIdx.x;
     const int image_feature = blockIdx.y;
-    const int image_y = blockIdx.z / W_grid + threadIdx.y;
-    const int image_x = blockIdx.z % W_grid + threadIdx.x;
+
+    const int ty = threadIdx.y;
+    const int tx = threadIdx.x;
+    const int image_y = (blockIdx.z / W_grid) * TILE_WIDTH + ty; /* Very crucial to working ! */ 
+    const int image_x = (blockIdx.z % W_grid) * TILE_WIDTH + tx;
+    const int convolve = (tx >= 0 && tx < TILE_WIDTH && ty >= 0 && ty < TILE_WIDTH);
 
     float acc = 0;
-
     for (int feature = 0; feature < num_input_features; feature++) {
-        for (int p = 0; p < mask_width; p++) {
-            for (int q = 0; q < mask_width; q++) {
-                acc += x4d(image_idx, feature, image_y + p, image_x + q) * k4d(image_feature, feature, p, q);
+        __syncthreads();
+        
+        /* Load values */
+        float val = 0;
+        if (image_x < image_width && image_y < image_width) {
+            val = x4d(image_idx, feature, image_y, image_x);
+        }
+        tile_data[ty][tx] = val;
+        
+        __syncthreads();
+
+        /* Do convolution step */
+        if (convolve) {
+            for (int i = 0; i < 5; i++) {
+                for (int j = 0; j < 5; j++) {
+                    acc += tile_data[ty + i][tx + j] * k4d(image_feature, feature, i, j);
+                }
             }
         }
     }
 
-    y4d(image_idx, image_feature, image_y, image_x) = acc;
+    if (convolve && image_y < image_width && image_x < image_width) {
+        y4d(image_idx, image_feature, image_y, image_x) = acc;
+    }
 }
 
 /* 
@@ -89,23 +113,24 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int H = x.shape_[2];
     const int W = x.shape_[3];
     const int K = w.shape_[3];
-
+    
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    const int H_grid = H_out / TILE_WIDTH;
-    const int W_grid = W_out / TILE_WIDTH;
+    const int H_grid = (H_out + (TILE_WIDTH - 1)) / TILE_WIDTH;
+    const int W_grid = (W_out + (TILE_WIDTH - 1)) / TILE_WIDTH;
     const int Z = H_grid * W_grid;
-    
-    // Set the kernel dimensions
-    dim3 gridDim(B, M, Z);
-    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
 
-    // Call the kernel
+    dim3 gridDim(B, M, Z);
+    dim3 blockDim(BLOCK_WIDTH, BLOCK_WIDTH, 1);
+
+    //const int kernel_size = H * C * K * K * sizeof(float);
+    //cudaMemcpyToSymbol(constFilter, w.dptr_, kernel_size);
+
+    //printf("Convolution filter is size %d bytes.\n", kernel_size);
     forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
-
 }
 
 /* 

@@ -20,5 +20,6 @@ commands:
 #    - nvprof python m1.2.py
 #    - /usr/bin/time python m2.1.py
     - /usr/bin/time python m3.1.py # execute code
+    - nvprof -o timeline.nvprof python m3.1.py
 #    - /usr/bin/time python m4.1.py # execute code
 #    - /usr/bin/time python final.py # execute code
