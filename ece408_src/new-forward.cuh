@@ -137,40 +137,36 @@ __global__ void forward_kernel(float* __restrict__ y, const float* __restrict__ 
 
 #define UNROLL_THREADS 1024
     
-__global__ void unroll_kernel(int C, int H, int W, int K, int b, float* X, float* X_unroll) {
-    int c, s, h_out, w_out, w_base;
-    int t = blockIdx.x * UNROLL_THREADS + threadIdx.x;
+__global__ void unroll_kernel(int C, int H, int W, int K, float* X, float* X_unroll) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int H_out = H - K + 1;
-    
     int W_out = W - K + 1;
     int W_unroll = H_out * W_out;
-
-#define x4d(i3, i2, i1, i0) X[(i3) * (H * W * C) + (i2) * (H * W) + (i1) * (W) + i0]
-#define xu2d(i1, i0) X_unroll[(i1) * (H_out * W_out) + i0]
     
-    if (t < C * W_unroll) {
-        c = t / W_unroll;
-        s = t % W_unroll; h_out = s / W_out;
+    if (tid < (C * K * K * W_unroll)) {
+        int row = tid / W_unroll;
+        int col = tid % W_unroll;
+
+        int q = row % K;
+        int p = (row / K) % K;
+        int feature = (row / K) / K;
         
-        w_out = s % W_out;
-        int h_unroll = h_out * W_out + w_out;
-        w_base = c * K * K;
+        int w = col % W_out;
+        int h = col / W_out;
         
-        for (int p = 0; p < K; p++) {
-            for(int q = 0; q < K; q++) {
-                int w_unroll = w_base + p * K + q;
-                xu2d(h_unroll, w_unroll) = x4d(b, c, h_out + p, w_out + q);
-            }
-        }
+        X_unroll[tid] = X[(feature) * (H * W) + (h+p) * W + w+q];
     }
 }
     
 void unroll_gpu(int C, int H, int W, int K, int b, float* X, float* X_unroll) {
     int H_out = H - K + 1;
     int W_out = W - K + 1;
-    //6int num_threads = C * H_out * W_out;
-    int num_blocks = ceil((C * H_out * W_out) / UNROLL_THREADS);
-    unroll_kernel<<<num_blocks, UNROLL_THREADS>>>(C, H, W, K, b, X, X_unroll);
+    int num_ops = C * K * K * H_out * W_out;
+    float* X_off = X + (b * C * H * W);
+
+    int num_blocks = (num_ops + 1024 - 1) / 1024;
+    int num_threads = 1024;
+    unroll_kernel<<<num_blocks, num_threads>>>(C, H, W, K, X_off, X_unroll);
 }
 
 #define GEMM_TILE_WIDTH 32
@@ -216,7 +212,7 @@ __global__ void matrixMultiplyShared(float *A, float *B, float *C,
     C[numCColumns * row + col] = p;
   }
 }
- 
+    
 /* 
    This function is called by new-inl.h
    Any code you write should be executed by this function.
@@ -237,44 +233,43 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int W_out = W - K + 1;
     const int H_grid = (H_out + (TILE_WIDTH - 1)) / TILE_WIDTH;
     const int W_grid = (W_out + (TILE_WIDTH - 1)) / TILE_WIDTH;
-    //const int Z = H_grid * W_grid;
 
-    //dim3 gridDim(B, M, Z);
-    //dim3 blockDim(BLOCK_WIDTH, BLOCK_WIDTH, 1);
 
-    //const int kernel_size = H * C * K * K * sizeof(float);
-    //cudaMemcpyToSymbol(constFilter, w.dptr_, kernel_size);
+    if (B > 500) {
+        const int W_unroll = C * K * K;
+        const int H_unroll = H_out * W_out;
+        float* X_unrolled;
+        cudaMalloc(&X_unrolled, sizeof(float) * W_unroll * H_unroll);
 
-    //printf("Convolution filter is size %d bytes.\n", kernel_size);
-    //forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+        for (int n = 0; n < B; n++) {
+            unroll_gpu(C, H, W, K, n, x.dptr_, X_unrolled);
 
-    const int W_unroll = C * K * K;
-    const int H_unroll = H_out * W_out;
-    float* X_unrolled;
-    cudaMalloc(&X_unrolled, sizeof(float) * W_unroll * H_unroll);
-    
-    for (int n = 0; n < B; n++) {
-        unroll_gpu(C, H, W, K, n, x.dptr_, X_unrolled);
+            const int numARows = M;
+            const int numACols = C * K * K;
+            const int numBRows = C * K * K;
+            const int numBCols = H_out * W_out;
+            const int numCRows = M;
+            const int numCCols = H_out * W_out;
 
-        const int numARows = M;
-        const int numACols = C * K * K;
-        const int numBRows = C * K * K;
-        const int numBCols = H_out * W_out;
-        const int numCRows = M;
-        const int numCCols = H_out * W_out;
-
-        const int tile_width = 32;
-        dim3 gridDim(ceil(numCCols / tile_width), ceil(numCRows / tile_width), 1);
-        dim3 blockDim(tile_width, tile_width, 1);
+            const int tile_width = 32;
+            dim3 gridDim((numCCols + tile_width - 1) / tile_width,
+                         (numCRows + tile_width - 1) / tile_width, 1);
+            dim3 blockDim(tile_width, tile_width, 1);
         
-        matrixMultiplyShared<<<gridDim, blockDim>>>(w.dptr_ + (C*H*W) * n,
-                                                    X_unrolled,
-                                                    y.dptr_ + (C*W_unroll*H_unroll),
-                                                    numARows, numACols,
-                                                    numBRows, numBCols,
-                                                    numCRows, numCCols);
-                             
-                             
+            matrixMultiplyShared<<<gridDim, blockDim>>>(w.dptr_,
+                                                        X_unrolled,
+                                                        y.dptr_ + n*(M*H_out*W_out),
+                                                        numARows, numACols,
+                                                        numBRows, numBCols,
+                                                        numCRows, numCCols);
+        }
+        
+        cudaFree(X_unrolled);
+    } else {
+        const int Z = H_grid * W_grid;
+        dim3 gridDim(B, M, Z);
+        dim3 blockDim(BLOCK_WIDTH, BLOCK_WIDTH, 1);
+        forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
     }
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
