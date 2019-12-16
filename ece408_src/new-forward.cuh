@@ -1,4 +1,3 @@
-
 #ifndef MXNET_OPERATOR_NEW_FORWARD_CUH_
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 
@@ -120,8 +119,104 @@ __global__ void forward_kernel(float* __restrict__ y, const float* __restrict__ 
     if (convolve && image_y < H_out && image_x < W_out) {
         y4d(image_idx, image_feature, image_y, image_x) = acc;
     }
+
+#undef y4d
+#undef x4d
+#undef k4d
+#undef input
+#undef output
+#undef weights
+#undef num_images
+#undef num_output_features
+#undef num_input_features
+#undef num_output_elements
+#undef image_width
+#undef mask_width
+
 }
 
+#define UNROLL_THREADS 1024
+    
+__global__ void unroll_kernel(int C, int H, int W, int K, int b, float* X, float* X_unroll) {
+    int c, s, h_out, w_out, w_base;
+    int t = blockIdx.x * UNROLL_THREADS + threadIdx.x;
+    int H_out = H - K + 1;
+    
+    int W_out = W - K + 1;
+    int W_unroll = H_out * W_out;
+
+#define x4d(i3, i2, i1, i0) X[(i3) * (H * W * C) + (i2) * (H * W) + (i1) * (W) + i0]
+#define xu2d(i1, i0) X_unroll[(i1) * (H_out * W_out) + i0]
+    
+    if (t < C * W_unroll) {
+        c = t / W_unroll;
+        s = t % W_unroll; h_out = s / W_out;
+        
+        w_out = s % W_out;
+        int h_unroll = h_out * W_out + w_out;
+        w_base = c * K * K;
+        
+        for (int p = 0; p < K; p++) {
+            for(int q = 0; q < K; q++) {
+                int w_unroll = w_base + p * K + q;
+                xu2d(h_unroll, w_unroll) = x4d(b, c, h_out + p, w_out + q);
+            }
+        }
+    }
+}
+    
+void unroll_gpu(int C, int H, int W, int K, int b, float* X, float* X_unroll) {
+    int H_out = H - K + 1;
+    int W_out = W - K + 1;
+    //6int num_threads = C * H_out * W_out;
+    int num_blocks = ceil((C * H_out * W_out) / UNROLL_THREADS);
+    unroll_kernel<<<num_blocks, UNROLL_THREADS>>>(C, H, W, K, b, X, X_unroll);
+}
+
+#define GEMM_TILE_WIDTH 32
+#define matSize(name) (sizeof(float) * num##name##Columns * num##name##Rows)
+
+// Compute C = A * B
+__global__ void matrixMultiplyShared(float *A, float *B, float *C,
+                                     int numARows, int numAColumns,
+                                     int numBRows, int numBColumns,
+                                     int numCRows, int numCColumns) {
+  __shared__ float subTileM[GEMM_TILE_WIDTH][GEMM_TILE_WIDTH];
+  __shared__ float subTileN[GEMM_TILE_WIDTH][GEMM_TILE_WIDTH];
+  
+  int bx = blockIdx.x;  int by = blockIdx.y;
+  int tx = threadIdx.x; int ty = threadIdx.y;
+
+  int row = by * GEMM_TILE_WIDTH + ty;
+  int col = bx * GEMM_TILE_WIDTH + tx;
+  float p = 0.0;
+  
+  int m_bound = (numAColumns + GEMM_TILE_WIDTH - 1) / GEMM_TILE_WIDTH;
+  for (int m = 0; m < m_bound; ++m) {
+    float val1 = 0;
+    float val2 = 0;
+    
+    if (m * GEMM_TILE_WIDTH + tx < numAColumns) {
+      val1 = A[row * numAColumns + m * GEMM_TILE_WIDTH + tx];
+    }
+    if (m * GEMM_TILE_WIDTH + ty < numBRows) {
+      val2 = B[(m * GEMM_TILE_WIDTH + ty) * numBColumns + col];
+    }
+    subTileM[ty][tx] = val1;
+    subTileN[ty][tx] = val2;
+    __syncthreads();
+    
+    for (int k = 0; k < GEMM_TILE_WIDTH; k++) {
+      p += subTileM[ty][k] * subTileN[k][tx];
+    }
+    __syncthreads();
+  }
+  
+  if (row < numCRows && col < numCColumns) {
+    C[numCColumns * row + col] = p;
+  }
+}
+ 
 /* 
    This function is called by new-inl.h
    Any code you write should be executed by this function.
@@ -131,28 +226,56 @@ template <>
 void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tensor<gpu, 4, float> &x, const mshadow::Tensor<gpu, 4, float> &w)
 {
     // Extract the tensor dimensions into B,M,C,H,W,K
-    const int B = x.shape_[0];
-    const int M = y.shape_[1];
-    const int C = x.shape_[1];
-    const int H = x.shape_[2];
-    const int W = x.shape_[3];
-    const int K = w.shape_[3];
+    const int B = x.shape_[0]; /* Batch Size */
+    const int M = y.shape_[1]; /* Output Channels */
+    const int C = x.shape_[1]; /* Input Channels */
+    const int H = x.shape_[2]; /* Height */
+    const int W = x.shape_[3]; /* Width */
+    const int K = w.shape_[3]; /* Filter Size */
     
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
     const int H_grid = (H_out + (TILE_WIDTH - 1)) / TILE_WIDTH;
     const int W_grid = (W_out + (TILE_WIDTH - 1)) / TILE_WIDTH;
-    const int Z = H_grid * W_grid;
+    //const int Z = H_grid * W_grid;
 
-    dim3 gridDim(B, M, Z);
-    dim3 blockDim(BLOCK_WIDTH, BLOCK_WIDTH, 1);
+    //dim3 gridDim(B, M, Z);
+    //dim3 blockDim(BLOCK_WIDTH, BLOCK_WIDTH, 1);
 
     //const int kernel_size = H * C * K * K * sizeof(float);
     //cudaMemcpyToSymbol(constFilter, w.dptr_, kernel_size);
 
     //printf("Convolution filter is size %d bytes.\n", kernel_size);
-    forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+    //forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
 
+    const int W_unroll = C * K * K;
+    const int H_unroll = H_out * W_out;
+    float* X_unrolled;
+    cudaMalloc(&X_unrolled, sizeof(float) * W_unroll * H_unroll);
+    
+    for (int n = 0; n < B; n++) {
+        unroll_gpu(C, H, W, K, n, x.dptr_, X_unrolled);
+
+        const int numARows = M;
+        const int numACols = C * K * K;
+        const int numBRows = C * K * K;
+        const int numBCols = H_out * W_out;
+        const int numCRows = M;
+        const int numCCols = H_out * W_out;
+
+        const int tile_width = 32;
+        dim3 gridDim(ceil(numCCols / tile_width), ceil(numCRows / tile_width), 1);
+        dim3 blockDim(tile_width, tile_width, 1);
+        
+        matrixMultiplyShared<<<gridDim, blockDim>>>(w.dptr_ + (C*H*W) * n,
+                                                    X_unrolled,
+                                                    y.dptr_ + (C*W_unroll*H_unroll),
+                                                    numARows, numACols,
+                                                    numBRows, numBCols,
+                                                    numCRows, numCCols);
+                             
+                             
+    }
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
 }
